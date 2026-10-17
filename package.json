@@ -2,7 +2,7 @@
   "name": "pi-quality-gates",
   "version": "0.1.0",
   "description": "Quality gates for pi coding-agent: settle-time rework loop + instant lint injection after edits. Host-agnostic core; ships as a pi extension package.",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "./index.ts",
   "keywords": ["pi", "pi-package", "pi-coding-agent", "quality", "lint", "verification", "settle-gate"],
