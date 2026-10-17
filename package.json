@@ -1,0 +1,20 @@
+{
+  "name": "pi-quality-gates",
+  "version": "0.1.0",
+  "description": "Quality gates for pi coding-agent: settle-time rework loop + instant lint injection after edits. Host-agnostic core; ships as a pi extension package.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.ts",
+  "keywords": ["pi", "pi-package", "pi-coding-agent", "quality", "lint", "verification", "settle-gate"],
+  "pi": { "extensions": ["./index.ts"] },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": { "node": ">=20" }
+}
