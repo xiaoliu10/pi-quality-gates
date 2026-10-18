@@ -1,5 +1,5 @@
 {
-  "name": "pi-quality-gates",
+  "name": "@wengine-ai/pi-quality-gates",
   "version": "0.1.0",
   "description": "Quality gates for pi coding-agent: settle-time rework loop + instant lint injection after edits. Host-agnostic core; ships as a pi extension package.",
   "license": "Apache-2.0",

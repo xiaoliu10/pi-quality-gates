@@ -87,3 +87,43 @@ describe('pluggable verifier', () => {
     expect(await result).toBeUndefined(); // null verification → no continuation
   });
 });
+
+describe('v0.2.0 commit gate + fail-closed + backpressure', () => {
+  const api = () => {
+    const handlers: Record<string, Function[]> = {};
+    return { on: (e: string, h: Function) => { (handlers[e] ??= []).push(h); }, cwd: '/x', handlers };
+  };
+  const fire = (a: ReturnType<typeof api>, ev: string, e: any) => Promise.all((a.handlers[ev] ?? []).map(h => h(e)));
+
+  it('blocks git commit while dirty and verify fails', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'pqg-gate-'));
+    try {
+      writeFileSync(join(cwd, 'verify.sh'), '#!/bin/sh\necho "FAIL: tests broke" >&2\nexit 1\n');
+      const a = api(); (a as any).cwd = cwd;
+      qualityGates(a as any, { env: {} });
+      await fire(a, 'tool_call', { type: 'tool_call', toolName: 'edit', input: {}, toolCallId: 'e1' });
+      const res = await fire(a, 'tool_call', { type: 'tool_call', toolName: 'bash', input: { command: 'git commit -m "wip"' }, toolCallId: 'b1' });
+      expect((res[0] as any)?.block).toBe(true);
+      expect(String((res[0] as any)?.reason)).toContain('FAIL');
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+
+  it('allows commit/push after a passing verify clears dirty', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'pqg-pass-'));
+    try {
+      writeFileSync(join(cwd, 'verify.sh'), '#!/bin/sh\nexit 0\n');
+      const a = api(); (a as any).cwd = cwd;
+      qualityGates(a as any, { env: {} });
+      await fire(a, 'tool_call', { type: 'tool_call', toolName: 'edit', input: {}, toolCallId: 'e1' });
+      expect((await fire(a, 'tool_call', { type: 'tool_call', toolName: 'bash', input: { command: 'git commit -m x' }, toolCallId: 'b1' }))[0]).toBeUndefined();
+      expect((await fire(a, 'tool_call', { type: 'tool_call', toolName: 'bash', input: { command: 'git push' }, toolCallId: 'b2' }))[0]).toBeUndefined();
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+
+  it('passing verify-like bash output collapses to one line (backpressure)', async () => {
+    const a = api();
+    qualityGates(a as any, { env: {} });
+    const res = await fire(a, 'tool_result', { toolName: 'bash', input: { command: 'npx vitest run' }, isError: false, content: [{ type: 'text', text: 'x'.repeat(5000) }], toolCallId: 'r1' });
+    expect(String((res[0] as any)?.content?.[0]?.text ?? '')).toContain('passed (output collapsed');
+  });
+});
