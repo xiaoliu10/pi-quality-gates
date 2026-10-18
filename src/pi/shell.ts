@@ -37,6 +37,7 @@ import { runChecks } from '../core/runner.ts';
 import type { VerificationRun } from '../core/settle.ts';
 import { DEFAULT_BUDGET } from '../core/settle.ts';
 import { CommandVerifier, EDIT_TOOLS, resolveCheckCommands } from '../core/command-verifier.ts';
+import { captureBaseline, checkTamper, type TamperBaseline } from '../core/tamper-guard.ts';
 import type { Verifier, VerifyContext } from '../core/verifier.ts';
 import type { PiBoundaryDraft, PiExtensionAPI, PiBeforeSettleResult, PiToolCallEvent, PiToolResultEvent } from './pi-types.ts';
 
@@ -75,8 +76,18 @@ export default function qualityGates(pi: PiExtensionAPI, options: QualityGatesOp
 	const ck = () => cwd;
 
 	const dirty = new Set<string>();
+	// Tamper guard baseline: captured at turn start (worktree hashes of the
+	// battery's dependency paths). undefined = no git / capture failed.
+	let baseline: TamperBaseline | undefined;
 	const verifier: Verifier = options.verifier ?? new CommandVerifier({ cwd, env, dirty });
 	const commandVerifier = verifier instanceof CommandVerifier ? verifier : undefined;
+
+	pi.on('turn_start', () => {
+		// Fresh turn ⇒ new baseline. Cheap when the tree is small; a slow hash-object
+		// on a huge test tree is still bounded by the git timeout. Capture failure
+		// leaves baseline undefined (checkTamper → unknown → withhold token).
+		void captureBaseline(cwd, env.PI_VERIFY_CMD ?? '').then((b) => { baseline = b; }, () => { baseline = undefined; });
+	});
 
 	pi.on('tool_call', async (event: PiToolCallEvent) => {
 		try {
@@ -86,6 +97,12 @@ export default function qualityGates(pi: PiExtensionAPI, options: QualityGatesOp
 			if (!GATE_COMMAND_RE.test(cmd)) return undefined;
 			// Clean tree (nothing dirty since the last passing verify) ships as-is.
 			if (!commandVerifier || !commandVerifier.isDirty(ck())) return undefined;
+			// Tamper guard: the battery's own dependencies changed since the turn
+			// began ⇒ its green would be meaningless. Block with the diff.
+			const tamper = await checkTamper(baseline, cwd, env.PI_VERIFY_CMD ?? '');
+			if (tamper.kind === 'tampered') {
+				return { block: true, reason: `[quality-gates] 检测到验证基础设施被改动（门的钥匙不能交给被考核者）：\n${tamper.changed.map((c: string) => `- ${c}`).join('\n')}\n\n${tamper.detail}\n请改代码而不是改检查；如确需改测试，向用户说明理由。` };
+			}
 			const checks = resolveCheckCommands(cwd, env);
 			if (!checks.length) return undefined;
 			let run: VerificationRun;
@@ -109,6 +126,13 @@ export default function qualityGates(pi: PiExtensionAPI, options: QualityGatesOp
 
 	pi.on('agent_before_settle', async (): Promise<PiBeforeSettleResult | undefined> => {
 		try {
+			// Tampered battery: skip the run (its result would be worthless) and
+			// hand the tamper report back for one more model turn.
+			const tamper = await checkTamper(baseline, cwd, env.PI_VERIFY_CMD ?? '');
+			if (tamper.kind === 'tampered') {
+				const draft: PiBoundaryDraft = { type: 'custom_message', customType: 'quality-gates', content: `验证基础设施在本次轮次中被改动：\n${tamper.changed.map((c: string) => `- ${c}`).join('\n')}\n\n${tamper.detail}\n\n改动代码让检查通过，而不是改检查本身。`, display: '检测到验证被改动' };
+				return { continue: true, entries: [draft] };
+			}
 			const ctx: VerifyContext = { conversationKey: ck(), messages: [], cwd };
 			const verification = await verifier.verify(ctx);
 			if (!verification) return undefined;

@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { resolveCheckCommands, default as qualityGates } from '../index.ts';
 import type { PiExtensionAPI } from '../src/pi/pi-types.ts';
 import type { VerificationRun } from '../src/core/settle.ts';
+import { execFileSync } from 'node:child_process';
+import { captureBaseline, checkTamper } from '../src/core/tamper-guard.ts';
 
 describe('resolveCheckCommands', () => {
   it('env wins and supports comma-separated battery', () => {
@@ -41,7 +43,7 @@ describe('extension shell wiring', () => {
     const handlers: string[] = [];
     const pi = { on: (evt: string) => handlers.push(evt) } as unknown as PiExtensionAPI;
     qualityGates(pi, { env: {} });
-    expect(handlers).toEqual(['tool_call', 'agent_before_settle', 'tool_result']);
+    expect(handlers).toEqual(['turn_start', 'tool_call', 'agent_before_settle', 'tool_result']);
   });
 });
 
@@ -125,5 +127,62 @@ describe('v0.2.0 commit gate + fail-closed + backpressure', () => {
     qualityGates(a as any, { env: {} });
     const res = await fire(a, 'tool_result', { toolName: 'bash', input: { command: 'npx vitest run' }, isError: false, content: [{ type: 'text', text: 'x'.repeat(5000) }], toolCallId: 'r1' });
     expect(String((res[0] as any)?.content?.[0]?.text ?? '')).toContain('passed (output collapsed');
+  });
+});
+
+describe('tamper guard（P1-1 结构性禁改验证）', () => {
+  const git = (args: string[], cwd: string) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+
+  const repo = () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'pqg-tamper-'));
+    git(['init', '-q'], cwd);
+    git(['config', 'user.email', 't@t'], cwd);
+    git(['config', 'user.name', 't'], cwd);
+    mkdirSync(join(cwd, 'tests'));
+    writeFileSync(join(cwd, 'verify.sh'), '#!/bin/sh\nexit 0\n');
+    writeFileSync(join(cwd, 'tests/a.test.ts'), 'expect(1).toBe(1)');
+    git(['add', '-A'], cwd);
+    git(['commit', '-qm', 'init'], cwd);
+    return cwd;
+  };
+
+  it('clean tree → clean', async () => {
+    const cwd = repo();
+    try {
+      const baseline = await captureBaseline(cwd, '');
+      const verdict = await checkTamper(baseline, cwd, '');
+      expect(verdict.kind).toBe('clean');
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+
+  it('weakened test after baseline → tampered with the file listed', async () => {
+    const cwd = repo();
+    try {
+      const baseline = await captureBaseline(cwd, '');
+      writeFileSync(join(cwd, 'tests/a.test.ts'), 'expect(1).toBe(1); test.skip("broken", () => { throw new Error("x") })');
+      const verdict = await checkTamper(baseline, cwd, '');
+      expect(verdict.kind).toBe('tampered');
+      if (verdict.kind === 'tampered') expect(verdict.changed.some((c: string) => c.includes('a.test.ts'))).toBe(true);
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+
+  it('deleted test → tampered (removal is a tamper shape too)', async () => {
+    const cwd = repo();
+    try {
+      const baseline = await captureBaseline(cwd, '');
+      rmSync(join(cwd, 'tests/a.test.ts'));
+      const verdict = await checkTamper(baseline, cwd, '');
+      expect(verdict.kind).toBe('tampered');
+      if (verdict.kind === 'tampered') expect(verdict.changed.join(' ')).toContain('已删除');
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+
+  it('non-git project → unknown（降级而非误判）', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'pqg-nogit-'));
+    try {
+      const baseline = await captureBaseline(cwd, '');
+      const verdict = await checkTamper(baseline, cwd, '');
+      expect(verdict.kind).toBe('unknown');
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
   });
 });
